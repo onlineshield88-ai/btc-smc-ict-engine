@@ -1,0 +1,5 @@
+kivy==2.2.1
+pandas
+numpy
+requests
+plyer
