@@ -1,28 +1,38 @@
 """
-engine.py
+engine.py (PURE PYTHON - tanpa pandas/numpy)
 ================================================================================
-Core engine analisa SMC + ICT + WMA + RSI + Fibonacci untuk BTCUSDT Futures.
+Versi ini FUNGSIONAL IDENTIK dengan engine.py v2 (yang pakai pandas/numpy),
+tapi ditulis ulang total tanpa dependency tersebut.
 
-Ini adalah versi REFACTOR dari smc_ict_hybrid_btcusdt.py (versi CLI) menjadi
-importable module, dipakai bersama oleh:
-  - main.py   (Kivy UI, untuk tampilan saat app dibuka)
-  - service.py (foreground service Android, untuk jalan di background)
+ALASAN: pandas/numpy gagal dikompilasi untuk Android NDK saat build APK
+(numpy>=2.x memakai fitur C++ std::unordered_map yang tidak kompatibel
+dengan clang toolchain Android NDK r25b yang dipakai python-for-android).
+Pure Python tidak butuh kompilasi native sama sekali, jadi build APK
+otomatis lebih ringan, lebih cepat, dan tidak rawan gagal seperti ini.
 
-Semua logika deteksi (market structure, order block, FVG/iFVG, fibo OTE,
-scoring, trade plan) IDENTIK dengan versi yang sudah diuji & dikalibrasi
-sebelumnya. Tidak ada perubahan logika - hanya restrukturisasi agar reusable.
+STRUKTUR DATA:
+Pengganti pd.DataFrame adalah list of dict, satu dict per candle:
+    candles = [{"time":..., "open":..., "high":..., "low":..., "close":...,
+                "volume":..., "atr":..., "rsi":..., ...}, ...]
+Index list = index candle (sama seperti df.iloc[i] sebelumnya).
+candles[-1] = candle terakhir/live (sama seperti df.iloc[-1] sebelumnya).
+
+Semua logika SMC/ICT (swing, BOS/CHoCH, OB, FVG/iFVG, Fibo OTE, retest
+filter, scoring, volatility regime, trade plan TP1/2/3) IDENTIK secara
+matematis dengan versi pandas - hanya cara mengakses data yang berubah.
 ================================================================================
 """
 
-import requests
-import pandas as pd
-import numpy as np
+import json
+import math
+import urllib.request
+import urllib.error
 import warnings
 warnings.filterwarnings("ignore")
 
 
 # =====================================================================
-# CONFIG (bisa di-override dari UI settings, lihat config.py)
+# CONFIG
 # =====================================================================
 
 SYMBOL          = "BTCUSDT"
@@ -30,7 +40,7 @@ TF_ENTRY        = "15m"
 TF_BIAS_1       = "1h"
 TF_BIAS_2       = "4h"
 
-LIMIT           = 300  # cukup untuk WMA119 (perlu min ~119) + slope lookback + swing detection
+LIMIT           = 300
 RISK_REWARD_MIN = 1.5
 ATR_SL_MULT     = 1.2
 ATR_PERIOD      = 14
@@ -38,220 +48,348 @@ ATR_PERIOD      = 14
 SCORE_MIN_LIGHT  = 40
 SCORE_MIN_STRONG = 55
 
-ENGINE_VERSION  = "HYBRID-SMC-ICT-WMA-RSI-FIBO v1.0"
+ENGINE_VERSION  = "HYBRID-SMC-ICT-WMA-RSI-FIBO v2.1 (pure-python)"
 
 
 # =====================================================================
-# BINANCE FETCH
+# BINANCE FETCH (urllib bawaan Python, tanpa dependency requests)
 # =====================================================================
 
 def get_binance_klines(symbol=SYMBOL, interval="15m", limit=LIMIT, futures=True):
+    """
+    Ambil data kline dari Binance memakai urllib (stdlib), bukan `requests`.
+    Mengembalikan (candles, error) - candles adalah list of dict, error
+    adalah None jika sukses atau string pesan error jika gagal.
+    """
     base_url = "https://fapi.binance.com/fapi/v1/klines" if futures \
         else "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    url = f"{base_url}?symbol={symbol}&interval={interval}&limit={limit}"
 
     try:
-        response = requests.get(base_url, params=params, timeout=10)
-        data = response.json()
+        req = urllib.request.Request(url, headers={"User-Agent": "btc-smc-ict-engine"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            raw = response.read().decode("utf-8")
+            data = json.loads(raw)
 
         if isinstance(data, dict) and data.get("code"):
             return None, f"Binance API error: {data}"
 
-        df = pd.DataFrame(data, columns=[
-            "time", "open", "high", "low", "close", "volume",
-            "close_time", "quote_asset_volume", "number_of_trades",
-            "taker_buy_base", "taker_buy_quote", "ignore"
-        ])
+        candles = []
+        for row in data:
+            candles.append({
+                "time": int(row[0]),       # ms epoch, dikonversi ke string ISO saat dibutuhkan
+                "open": float(row[1]),
+                "high": float(row[2]),
+                "low": float(row[3]),
+                "close": float(row[4]),
+                "volume": float(row[5]),
+            })
+        return candles, None
 
-        numeric_cols = ["open", "high", "low", "close", "volume"]
-        for col in numeric_cols:
-            df[col] = df[col].astype(float)
-
-        df["time"] = pd.to_datetime(df["time"], unit="ms")
-        df = df[["time", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
-        return df, None
-
+    except urllib.error.URLError as e:
+        return None, f"Fetch gagal (koneksi): {e}"
     except Exception as e:
         return None, f"Fetch gagal: {e}"
+
+
+def _time_to_str(ms_epoch):
+    """Konversi epoch ms ke string 'YYYY-MM-DD HH:MM:SS' tanpa pandas/datetime libs eksternal."""
+    import datetime
+    dt = datetime.datetime.utcfromtimestamp(ms_epoch / 1000)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+# =====================================================================
+# HELPER: operasi list numerik pengganti pandas/numpy
+# =====================================================================
+
+def _ema(values, period):
+    """
+    Exponential moving average dengan alpha = 1/period (setara
+    pandas .ewm(alpha=1/period, adjust=False).mean()).
+    Mengembalikan list sepanjang values, None untuk index yang belum
+    punya nilai sebelumnya (index 0 dipakai sebagai seed pertama).
+    """
+    if not values:
+        return []
+    alpha = 1.0 / period
+    result = [None] * len(values)
+    result[0] = values[0]
+    for i in range(1, len(values)):
+        prev = result[i - 1]
+        v = values[i]
+        if prev is None or v is None:
+            result[i] = v
+        else:
+            result[i] = alpha * v + (1 - alpha) * prev
+    return result
+
+
+def _wma(values, length):
+    """
+    Weighted moving average dengan bobot linear 1..length (setara
+    pandas .rolling(length).apply(weighted)). None untuk index yang
+    belum punya cukup data ke belakang.
+    """
+    n = len(values)
+    result = [None] * n
+    weight_sum = length * (length + 1) / 2
+    for i in range(length - 1, n):
+        window = values[i - length + 1: i + 1]
+        if any(v is None for v in window):
+            continue
+        weighted = sum(w * v for w, v in zip(range(1, length + 1), window))
+        result[i] = weighted / weight_sum
+    return result
+
+
+def _rolling_mean(values, window):
+    """Rolling mean sederhana (setara pandas .rolling(window).mean())."""
+    n = len(values)
+    result = [None] * n
+    for i in range(window - 1, n):
+        chunk = values[i - window + 1: i + 1]
+        if any(v is None for v in chunk):
+            continue
+        result[i] = sum(chunk) / window
+    return result
+
+
+def _tail_mean(values, n_tail):
+    """Mean dari n_tail elemen terakhir, mengabaikan None (setara .tail(n).mean())."""
+    chunk = [v for v in values[-n_tail:] if v is not None]
+    if not chunk:
+        return None
+    return sum(chunk) / len(chunk)
+
+
+def is_nan(v):
+    """Pengganti pd.isna() untuk float biasa / None."""
+    if v is None:
+        return True
+    try:
+        return math.isnan(v)
+    except TypeError:
+        return False
 
 
 # =====================================================================
 # INDICATORS
 # =====================================================================
 
-def add_indicators(df, atr_period=ATR_PERIOD, wma_fast=9, wma_slow=119, rsi_period=14):
+def add_indicators(candles, atr_period=ATR_PERIOD, wma_fast=9, wma_slow=119, rsi_period=14):
     """
-    PERUBAHAN v2: wma_slow default diganti dari 21 -> 119.
-    WMA9/WMA21 di BTC 15m terlalu sensitif dan sering fake-cross saat choppy.
-    WMA9/WMA119 (diadopsi dari smclite v7.6.8) jauh lebih stabil sebagai
-    filter trend menengah, sambil WMA9 tetap dipakai sebagai trigger cepat.
+    Tambahkan ATR, WMA9/WMA119, RSI(14), RSI(2) ke tiap dict candle (in-place
+    pada list baru, tidak memodifikasi input asli).
+    wma_slow default 119 (bukan 21) - filter trend lebih stabil di BTC 15m,
+    lebih tahan fake-cross dibanding WMA9/WMA21.
     """
-    df = df.copy()
+    n = len(candles)
+    candles = [dict(c) for c in candles]  # copy shallow, jangan mutate input
 
-    high_low   = df["high"] - df["low"]
-    high_close = (df["high"] - df["close"].shift()).abs()
-    low_close  = (df["low"] - df["close"].shift()).abs()
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df["atr"] = true_range.ewm(alpha=1 / atr_period, adjust=False).mean()
+    highs  = [c["high"] for c in candles]
+    lows   = [c["low"] for c in candles]
+    closes = [c["close"] for c in candles]
 
-    def wma(series, length):
-        weights = np.arange(1, length + 1)
-        return series.rolling(length).apply(
-            lambda x: np.dot(x, weights) / weights.sum(), raw=True
-        )
+    # --- True Range & ATR (Wilder smoothing via EMA alpha=1/period) ---
+    true_ranges = []
+    for i in range(n):
+        if i == 0:
+            tr = highs[i] - lows[i]
+        else:
+            tr = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1]),
+            )
+        true_ranges.append(tr)
+    atr_values = _ema(true_ranges, atr_period)
 
-    df["wma_fast"] = wma(df["close"], wma_fast)
-    df["wma_slow"] = wma(df["close"], wma_slow)
+    # --- WMA fast & slow ---
+    wma_fast_values = _wma(closes, wma_fast)
+    wma_slow_values = _wma(closes, wma_slow)
 
-    delta = df["close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / rsi_period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / rsi_period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    df["rsi"] = 100 - (100 / (1 + rs))
-    df["rsi"] = df["rsi"].fillna(50)
+    # --- RSI(14) & RSI(2), Wilder smoothing ---
+    # PENTING: index 0 harus None (bukan 0.0), karena pandas .diff() di index
+    # pertama menghasilkan NaN (tidak ada candle sebelumnya untuk dibandingkan).
+    # Ini krusial untuk seeding EMA yang benar - kalau index 0 dipaksa jadi 0.0,
+    # EMA akan ter-seed dengan nilai salah dan errornya menetap selama puluhan
+    # candle sebelum akhirnya teredam (terbukti dari regression test).
+    gains = [None]
+    losses = [None]
+    for i in range(1, n):
+        delta = closes[i] - closes[i - 1]
+        gains.append(max(delta, 0.0))
+        losses.append(max(-delta, 0.0))
 
-    # RSI(2) - dari smclite, dipakai untuk deteksi pump exhaustion (sangat
-    # sensitif terhadap overbought/oversold ekstrem jangka pendek)
-    rsi2_period = 2
-    avg_gain2 = gain.ewm(alpha=1 / rsi2_period, adjust=False).mean()
-    avg_loss2 = loss.ewm(alpha=1 / rsi2_period, adjust=False).mean()
-    rs2 = avg_gain2 / avg_loss2.replace(0, np.nan)
-    df["rsi2"] = 100 - (100 / (1 + rs2))
-    df["rsi2"] = df["rsi2"].fillna(50)
+    def calc_rsi(gains, losses, period):
+        avg_gain = _ema(gains, period)
+        avg_loss = _ema(losses, period)
+        rsi_vals = []
+        for ag, al in zip(avg_gain, avg_loss):
+            # Replikasi PERSIS perilaku pandas asli:
+            # rs = avg_gain / avg_loss.replace(0, np.nan)  -> avg_loss==0 jadi NaN
+            # rsi = 100 - 100/(1+rs)                        -> NaN/0 jadi NaN
+            # rsi.fillna(50)                                -> NaN (termasuk dari
+            #                                                  avg_loss==0) SELALU jadi 50,
+            #                                                  apapun nilai avg_gain saat itu.
+            if ag is None or al is None or al == 0:
+                rsi_vals.append(50.0)
+            else:
+                rs = ag / al
+                rsi_vals.append(100 - (100 / (1 + rs)))
+        return rsi_vals
 
-    return df
+    rsi_values  = calc_rsi(gains, losses, rsi_period)
+    rsi2_values = calc_rsi(gains, losses, 2)
+
+    for i, c in enumerate(candles):
+        c["atr"]      = atr_values[i]
+        c["wma_fast"] = wma_fast_values[i]
+        c["wma_slow"] = wma_slow_values[i]
+        c["rsi"]      = rsi_values[i]
+        c["rsi2"]     = rsi2_values[i]
+
+    return candles
 
 
 # =====================================================================
 # SWING POINTS
 # =====================================================================
 
-def detect_swings(df, left=2, right=2):
-    df = df.copy()
-    df["swing_high"] = False
-    df["swing_low"] = False
+def detect_swings(candles, left=2, right=2):
+    """Deteksi swing high / swing low fraktal. Identik logikanya dengan versi pandas."""
+    candles = [dict(c) for c in candles]
+    n = len(candles)
+    for c in candles:
+        c["swing_high"] = False
+        c["swing_low"] = False
 
-    n = len(df)
     for i in range(left, n - right):
-        window_high = df["high"].iloc[i - left: i + right + 1]
-        window_low  = df["low"].iloc[i - left: i + right + 1]
+        window_high = [candles[j]["high"] for j in range(i - left, i + right + 1)]
+        window_low  = [candles[j]["low"] for j in range(i - left, i + right + 1)]
 
-        if df["high"].iloc[i] == window_high.max() and \
-           (window_high == window_high.max()).sum() == 1:
-            df.loc[df.index[i], "swing_high"] = True
+        max_h = max(window_high)
+        if candles[i]["high"] == max_h and window_high.count(max_h) == 1:
+            candles[i]["swing_high"] = True
 
-        if df["low"].iloc[i] == window_low.min() and \
-           (window_low == window_low.min()).sum() == 1:
-            df.loc[df.index[i], "swing_low"] = True
+        min_l = min(window_low)
+        if candles[i]["low"] == min_l and window_low.count(min_l) == 1:
+            candles[i]["swing_low"] = True
 
-    return df
+    return candles
 
 
 # =====================================================================
 # MARKET STRUCTURE: BOS & CHoCH
 # =====================================================================
 
-def detect_structure(df):
-    df = df.copy()
-    df["bos_bullish"]   = False
-    df["bos_bearish"]   = False
-    df["choch_bullish"] = False
-    df["choch_bearish"] = False
-    df["trend"] = None
+def detect_structure(candles):
+    """Deteksi Break of Structure (BOS) dan Change of Character (CHoCH). Identik dengan versi pandas."""
+    candles = [dict(c) for c in candles]
+    for c in candles:
+        c["bos_bullish"] = False
+        c["bos_bearish"] = False
+        c["choch_bullish"] = False
+        c["choch_bearish"] = False
+        c["trend"] = None
 
     last_swing_high = None
-    last_swing_low  = None
+    last_swing_low = None
     trend = None
 
-    for i in range(len(df)):
-        if df["swing_high"].iloc[i]:
-            last_swing_high = df["high"].iloc[i]
-        if df["swing_low"].iloc[i]:
-            last_swing_low = df["low"].iloc[i]
+    for i, c in enumerate(candles):
+        if c["swing_high"]:
+            last_swing_high = c["high"]
+        if c["swing_low"]:
+            last_swing_low = c["low"]
 
-        close = df["close"].iloc[i]
+        close = c["close"]
 
         if last_swing_high is not None and close > last_swing_high:
             if trend == "down":
-                df.loc[df.index[i], "choch_bullish"] = True
+                c["choch_bullish"] = True
             else:
-                df.loc[df.index[i], "bos_bullish"] = True
+                c["bos_bullish"] = True
             trend = "up"
             last_swing_high = None
 
         if last_swing_low is not None and close < last_swing_low:
             if trend == "up":
-                df.loc[df.index[i], "choch_bearish"] = True
+                c["choch_bearish"] = True
             else:
-                df.loc[df.index[i], "bos_bearish"] = True
+                c["bos_bearish"] = True
             trend = "down"
             last_swing_low = None
 
-        df.loc[df.index[i], "trend"] = trend
+        c["trend"] = trend
 
-    return df
+    return candles
 
 
 # =====================================================================
 # LIQUIDITY SWEEP
 # =====================================================================
 
-def detect_sweep(df, lookback=20):
-    df = df.copy()
-    df["sweep_high"] = False
-    df["sweep_low"]  = False
+def detect_sweep(candles, lookback=20):
+    """Deteksi liquidity sweep. Identik logikanya dengan versi pandas."""
+    candles = [dict(c) for c in candles]
+    n = len(candles)
+    for c in candles:
+        c["sweep_high"] = False
+        c["sweep_low"] = False
 
-    for i in range(lookback, len(df)):
-        recent = df.iloc[i - lookback:i]
-        recent_high = recent["high"].max()
-        recent_low  = recent["low"].min()
+    for i in range(lookback, n):
+        recent = candles[i - lookback:i]
+        recent_highs = [c["high"] for c in recent]
+        recent_lows  = [c["low"] for c in recent]
+        recent_high = max(recent_highs)
+        recent_low  = min(recent_lows)
 
-        penetration_high = df["high"].iloc[i] - recent_high
-        penetration_low  = recent_low - df["low"].iloc[i]
-        avg_range = (recent["high"] - recent["low"]).mean()
+        penetration_high = candles[i]["high"] - recent_high
+        penetration_low  = recent_low - candles[i]["low"]
+        avg_range = sum(c["high"] - c["low"] for c in recent) / len(recent)
 
-        if (df["high"].iloc[i] > recent_high and df["close"].iloc[i] < recent_high
+        if (candles[i]["high"] > recent_high and candles[i]["close"] < recent_high
                 and penetration_high > avg_range * 0.05):
-            df.loc[df.index[i], "sweep_high"] = True
+            candles[i]["sweep_high"] = True
 
-        if (df["low"].iloc[i] < recent_low and df["close"].iloc[i] > recent_low
+        if (candles[i]["low"] < recent_low and candles[i]["close"] > recent_low
                 and penetration_low > avg_range * 0.05):
-            df.loc[df.index[i], "sweep_low"] = True
+            candles[i]["sweep_low"] = True
 
-    return df
+    return candles
 
 
 # =====================================================================
-# VOLATILITY REGIME (diadopsi dari smclite v7.6.8)
+# VOLATILITY REGIME
 # =====================================================================
 
-def get_volatility_regime(df):
+def get_volatility_regime(candles):
     """
-    Klasifikasi rezim volatilitas pasar saat ini berdasarkan ATR relatif
-    terhadap rata-rata jangka lebih panjang, dikombinasikan dengan slope WMA119.
-
-    HIGH_VOLATILITY: ATR jauh di atas rata-rata - buffer SL/TP perlu melebar
-    CHOPPY: ATR rendah + WMA119 nyaris flat - market sideways, sinyal lebih
-            rawan fake-out, buffer SL/TP perlu menyempit
-    TRENDING: kondisi normal/sehat untuk mengikuti arah trend
-
-    CATATAN: atr_avg baseline pakai window 100 candle (bukan 50) supaya
-    tidak self-referencing - kalau baseline dihitung dari window yang sama
-    dengan periode choppy yang sedang dideteksi, baseline itu sendiri ikut
-    turun dan rasio tidak pernah benar-benar lolos threshold.
+    Klasifikasi rezim volatilitas: HIGH_VOLATILITY / CHOPPY / TRENDING.
+    Identik logikanya dengan versi pandas (baseline atr_avg dari 100
+    candle terakhir, supaya tidak self-referencing dengan periode choppy
+    yang sedang dideteksi).
     """
-    if len(df) < 110:
+    n = len(candles)
+    if n < 110:
         return "TRENDING"
 
-    atr_now = df["atr"].iloc[-1]
-    atr_avg = df["atr"].tail(100).mean()
+    atr_now = candles[-1]["atr"]
+    atr_tail_100 = [c["atr"] for c in candles[-100:] if c["atr"] is not None]
+    if not atr_tail_100:
+        return "TRENDING"
+    atr_avg = sum(atr_tail_100) / len(atr_tail_100)
 
-    if pd.isna(atr_now) or pd.isna(atr_avg) or atr_avg == 0:
+    if is_nan(atr_now) or atr_avg == 0:
         return "TRENDING"
 
-    wma_slope = abs(df["wma_slow"].iloc[-1] - df["wma_slow"].iloc[-5])
+    wma_last = candles[-1]["wma_slow"]
+    wma_prev = candles[-5]["wma_slow"]
+    if wma_last is None or wma_prev is None:
+        return "TRENDING"
+    wma_slope = abs(wma_last - wma_prev)
 
     if atr_now > atr_avg * 1.6:
         return "HIGH_VOLATILITY"
@@ -266,47 +404,51 @@ def get_volatility_regime(df):
 # ORDER BLOCK
 # =====================================================================
 
-def detect_orderblock(df, body_mult=1.5, avg_window=20, max_age=30):
-    df = df.copy()
-    avg_body = (df["close"] - df["open"]).abs().rolling(avg_window).mean()
+def detect_orderblock(candles, body_mult=1.5, avg_window=20, max_age=30):
+    """Deteksi Order Block tervalidasi impulsive leg. Identik logikanya dengan versi pandas."""
+    n = len(candles)
+    bodies = [abs(c["close"] - c["open"]) for c in candles]
+    avg_body = _rolling_mean(bodies, avg_window)
 
     bullish_obs = []
     bearish_obs = []
 
-    n = len(df)
     for i in range(avg_window, n - 1):
-        body_next = abs(df["close"].iloc[i + 1] - df["open"].iloc[i + 1])
-        threshold = avg_body.iloc[i] * body_mult
-        if pd.isna(threshold):
+        threshold = avg_body[i]
+        if threshold is None:
             continue
+        threshold *= body_mult
 
-        is_bearish_candle = df["close"].iloc[i] < df["open"].iloc[i]
-        is_bullish_candle = df["close"].iloc[i] > df["open"].iloc[i]
-        next_bullish = df["close"].iloc[i + 1] > df["open"].iloc[i + 1]
-        next_bearish = df["close"].iloc[i + 1] < df["open"].iloc[i + 1]
+        body_next = abs(candles[i + 1]["close"] - candles[i + 1]["open"])
+
+        is_bearish_candle = candles[i]["close"] < candles[i]["open"]
+        is_bullish_candle = candles[i]["close"] > candles[i]["open"]
+        next_bullish = candles[i + 1]["close"] > candles[i + 1]["open"]
+        next_bearish = candles[i + 1]["close"] < candles[i + 1]["open"]
 
         if is_bearish_candle and next_bullish and body_next > threshold:
             if n - 1 - i <= max_age:
                 bullish_obs.append({
-                    "index": i, "high": df["high"].iloc[i], "low": df["low"].iloc[i],
+                    "index": i, "high": candles[i]["high"], "low": candles[i]["low"],
                     "age": n - 1 - i
                 })
 
         if is_bullish_candle and next_bearish and body_next > threshold:
             if n - 1 - i <= max_age:
                 bearish_obs.append({
-                    "index": i, "high": df["high"].iloc[i], "low": df["low"].iloc[i],
+                    "index": i, "high": candles[i]["high"], "low": candles[i]["low"],
                     "age": n - 1 - i
                 })
 
-    nearest_bull_ob = _nearest_unmitigated(df, bullish_obs, "bullish")
-    nearest_bear_ob = _nearest_unmitigated(df, bearish_obs, "bearish")
+    nearest_bull_ob = _nearest_unmitigated(candles, bullish_obs, "bullish")
+    nearest_bear_ob = _nearest_unmitigated(candles, bearish_obs, "bearish")
 
     return nearest_bull_ob, nearest_bear_ob
 
 
-def _nearest_unmitigated(df, ob_list, kind):
-    last_close = df["close"].iloc[-1]
+def _nearest_unmitigated(candles, ob_list, kind):
+    """Ambil OB termuda yang belum sepenuhnya termitigasi."""
+    last_close = candles[-1]["close"]
     for ob in sorted(ob_list, key=lambda x: x["age"]):
         if kind == "bullish" and last_close > ob["low"]:
             return ob
@@ -319,45 +461,45 @@ def _nearest_unmitigated(df, ob_list, kind):
 # FVG & iFVG
 # =====================================================================
 
-def detect_fvg_ifvg(df, max_age=15, fill_window=20):
-    df = df.copy()
-    n = len(df)
+def detect_fvg_ifvg(candles, max_age=15, fill_window=20):
+    """Deteksi FVG dan iFVG (failed-fill + reverse). Identik logikanya dengan versi pandas."""
+    n = len(candles)
 
     fvg_bull_zones = []
     fvg_bear_zones = []
 
     for i in range(2, n):
-        if df["low"].iloc[i] > df["high"].iloc[i - 2]:
+        if candles[i]["low"] > candles[i - 2]["high"]:
             fvg_bull_zones.append({
-                "start_idx": i, "top": df["low"].iloc[i], "bottom": df["high"].iloc[i - 2],
+                "start_idx": i, "top": candles[i]["low"], "bottom": candles[i - 2]["high"],
                 "filled": False, "inversed": False, "fill_idx": None
             })
 
-        if df["high"].iloc[i] < df["low"].iloc[i - 2]:
+        if candles[i]["high"] < candles[i - 2]["low"]:
             fvg_bear_zones.append({
-                "start_idx": i, "top": df["low"].iloc[i - 2], "bottom": df["high"].iloc[i],
+                "start_idx": i, "top": candles[i - 2]["low"], "bottom": candles[i]["high"],
                 "filled": False, "inversed": False, "fill_idx": None
             })
 
     def process_zone(zone, kind):
         start = zone["start_idx"]
         for j in range(start + 1, min(start + fill_window, n)):
-            if kind == "bull" and df["low"].iloc[j] <= zone["bottom"]:
+            if kind == "bull" and candles[j]["low"] <= zone["bottom"]:
                 zone["filled"] = True
                 zone["fill_idx"] = j
                 break
-            if kind == "bear" and df["high"].iloc[j] >= zone["top"]:
+            if kind == "bear" and candles[j]["high"] >= zone["top"]:
                 zone["filled"] = True
                 zone["fill_idx"] = j
                 break
 
         if zone["filled"]:
             for k in range(zone["fill_idx"] + 1, min(zone["fill_idx"] + fill_window, n)):
-                if kind == "bull" and df["close"].iloc[k] < zone["bottom"]:
+                if kind == "bull" and candles[k]["close"] < zone["bottom"]:
                     zone["inversed"] = True
                     zone["inverse_idx"] = k
                     break
-                if kind == "bear" and df["close"].iloc[k] > zone["top"]:
+                if kind == "bear" and candles[k]["close"] > zone["top"]:
                     zone["inversed"] = True
                     zone["inverse_idx"] = k
                     break
@@ -387,38 +529,43 @@ def detect_fvg_ifvg(df, max_age=15, fill_window=20):
 # FIBONACCI OTE ZONE
 # =====================================================================
 
-def get_fibo_ote(df):
-    df = df.copy()
-    swing_highs = df[df["swing_high"]]
-    swing_lows  = df[df["swing_low"]]
+def get_fibo_ote(candles):
+    """Hitung Fibonacci retracement dari leg impulsif terakhir. Identik logikanya dengan versi pandas."""
+    swing_high_idxs = [i for i, c in enumerate(candles) if c["swing_high"]]
+    swing_low_idxs  = [i for i, c in enumerate(candles) if c["swing_low"]]
 
-    if len(swing_highs) == 0 or len(swing_lows) == 0:
+    if not swing_high_idxs or not swing_low_idxs:
         return None
 
-    last_high_idx = swing_highs.index[-1]
-    last_low_idx  = swing_lows.index[-1]
+    last_high_idx = swing_high_idxs[-1]
+    last_low_idx  = swing_low_idxs[-1]
 
-    leg_low  = df["low"].loc[last_low_idx]
-    leg_high = df["high"].loc[last_high_idx]
+    leg_low  = candles[last_low_idx]["low"]
+    leg_high = candles[last_high_idx]["high"]
     direction = "up" if last_low_idx < last_high_idx else "down"
 
     diff = leg_high - leg_low
     if diff <= 0:
         return None
 
-    levels = {
-        "0.0": leg_high if direction == "down" else leg_low,
-        "0.5": leg_low + diff * 0.5,
-        "0.618": leg_low + diff * 0.382 if direction == "down" else leg_low + diff * 0.618,
-        "0.79": leg_low + diff * 0.21 if direction == "down" else leg_low + diff * 0.79,
-        "1.0": leg_low if direction == "down" else leg_high,
-    }
+    if direction == "down":
+        level_0   = leg_high
+        level_618 = leg_low + diff * 0.382
+        level_79  = leg_low + diff * 0.21
+        level_1   = leg_low
+    else:
+        level_0   = leg_low
+        level_618 = leg_low + diff * 0.618
+        level_79  = leg_low + diff * 0.79
+        level_1   = leg_high
 
-    ote_top = max(levels["0.618"], levels["0.79"])
-    ote_bottom = min(levels["0.618"], levels["0.79"])
+    level_05 = leg_low + diff * 0.5
 
-    current_price = df["close"].iloc[-1]
-    midpoint = levels["0.5"]
+    ote_top = max(level_618, level_79)
+    ote_bottom = min(level_618, level_79)
+
+    current_price = candles[-1]["close"]
+    midpoint = level_05
     zone = "premium" if current_price > midpoint else "discount"
 
     return {
@@ -430,32 +577,38 @@ def get_fibo_ote(df):
 
 
 # =====================================================================
-# RETEST CONFIRMATION (versi diperketat - retest ke zona OB/FVG asli)
+# HTF BIAS
 # =====================================================================
 
-def get_retest_confirmation(df, direction, ob, fvg_zone, lookback=10):
+def get_htf_bias(htf_candles):
+    """Tentukan bias trend timeframe tinggi. Identik logikanya dengan versi pandas."""
+    htf_candles = add_indicators(htf_candles)
+    htf_candles = detect_swings(htf_candles)
+    htf_candles = detect_structure(htf_candles)
+
+    last = htf_candles[-1]
+    wma_bias = "bullish" if last["wma_fast"] > last["wma_slow"] else "bearish"
+    structure_bias = last["trend"] if last["trend"] else "neutral"
+
+    if wma_bias == "bullish" and structure_bias == "up":
+        bias = "bullish"
+    elif wma_bias == "bearish" and structure_bias == "down":
+        bias = "bearish"
+    else:
+        bias = "mixed"
+
+    return {"bias": bias, "wma_bias": wma_bias, "structure_bias": structure_bias}
+
+
+# =====================================================================
+# RETEST CONFIRMATION
+# =====================================================================
+
+def get_retest_confirmation(candles, direction, ob, fvg_zone, lookback=10):
     """
-    PERBAIKAN dari smclite v7.6.8: versi smclite hanya cek price vs WMA9
-    (parameter high/low di-assign tapi tidak pernah dipakai - dead code).
-    Itu tidak benar-benar memverifikasi bahwa price sudah RETEST ke zona
-    struktural (OB/FVG) yang menjadi alasan sinyal muncul.
-
-    PERBAIKAN v2 (setelah testing): versi pertama filter ini ternyata
-    redundant dengan calculate_score() - scoring sendiri sudah mensyaratkan
-    price dekat zona OB sebagai bagian confluence, jadi "price overlap
-    dengan zona di N candle terakhir" hampir selalu otomatis benar dan
-    filter tidak menambah selektivitas apapun (pass rate >97%, basically
-    tidak berfungsi sebagai filter).
-
-    Definisi retest yang benar: candle SUDAH PERNAH MENINGGALKAN zona
-    (bergerak impulsif menjauh setelah OB/FVG terbentuk), KEMUDIAN kembali
-    menyentuh zona itu sekali lagi (retest), baru kemudian close kembali
-    bergerak searah sinyal. Ini independen dari kondisi scoring karena
-    mensyaratkan riwayat "menjauh dulu" yang tidak dicek oleh scoring.
-
-    Jika tidak ada OB maupun FVG sama sekali (sinyal murni dari momentum/
-    sweep/fibo), retest dianggap valid secara default - tidak ada zona
-    konkret untuk diretest.
+    Validasi retest ke zona OB/FVG: price harus pernah menjauh dari zona,
+    lalu kembali retest, baru bergerak searah sinyal. Identik logikanya
+    dengan versi pandas.
     """
     if not ob and not fvg_zone:
         return True
@@ -472,87 +625,59 @@ def get_retest_confirmation(df, direction, ob, fvg_zone, lookback=10):
     if zone_low is None or zone_high is None:
         return True
 
-    # Tentukan window candle SETELAH zona terbentuk untuk dicek pola
-    # "menjauh lalu retest". Kalau OB/FVG baru terbentuk 1-2 candle lalu,
-    # belum ada cukup waktu untuk pola retest sungguhan terjadi - dianggap
-    # belum valid (terlalu dini, tunggu cycle berikutnya).
     if zone_age is not None and zone_age < 3:
         return False
 
-    window = df.tail(min(lookback, zone_age if zone_age else lookback))
+    window_size = min(lookback, zone_age if zone_age else lookback)
+    window = candles[-window_size:] if window_size > 0 else []
     if len(window) < 3:
         return False
 
-    last_close = df["close"].iloc[-1]
+    last_close = candles[-1]["close"]
 
     if direction == "BUY":
-        # Harus pernah ada candle yang close-nya jelas DI ATAS zona
-        # (bergerak menjauh ke atas) sebelum candle² terakhir kembali turun
-        away = (window["low"] > zone_high).any()
-        # Lalu harus ada candle yang kembali masuk/menyentuh zona (retest)
-        retested = ((window["low"] <= zone_high) & (window["high"] >= zone_low)).any()
+        away = any(c["low"] > zone_high for c in window)
+        retested = any(c["low"] <= zone_high and c["high"] >= zone_low for c in window)
         back_in_direction = last_close >= zone_low
         return bool(away and retested and back_in_direction)
     else:
-        away = (window["high"] < zone_low).any()
-        retested = ((window["low"] <= zone_high) & (window["high"] >= zone_low)).any()
+        away = any(c["high"] < zone_low for c in window)
+        retested = any(c["low"] <= zone_high and c["high"] >= zone_low for c in window)
         back_in_direction = last_close <= zone_high
         return bool(away and retested and back_in_direction)
-
-
-# =====================================================================
-# HTF BIAS
-# =====================================================================
-
-def get_htf_bias(df_htf):
-    df_htf = add_indicators(df_htf)
-    df_htf = detect_swings(df_htf)
-    df_htf = detect_structure(df_htf)
-
-    last = df_htf.iloc[-1]
-    wma_bias = "bullish" if last["wma_fast"] > last["wma_slow"] else "bearish"
-    structure_bias = last["trend"] if last["trend"] else "neutral"
-
-    if wma_bias == "bullish" and structure_bias == "up":
-        bias = "bullish"
-    elif wma_bias == "bearish" and structure_bias == "down":
-        bias = "bearish"
-    else:
-        bias = "mixed"
-
-    return {"bias": bias, "wma_bias": wma_bias, "structure_bias": structure_bias}
 
 
 # =====================================================================
 # SCORING ENGINE
 # =====================================================================
 
-def calculate_score(df, ob_bull, ob_bear, fvg_data, fibo, bias_1h, bias_4h):
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+def calculate_score(candles, ob_bull, ob_bear, fvg_data, fibo, bias_1h, bias_4h):
+    """Hitung skor confluence bullish/bearish. Identik logikanya dengan versi pandas."""
+    last = candles[-1]
+    prev = candles[-2]
 
     score_bull = 0
     score_bear = 0
     reasons_bull = []
     reasons_bear = []
 
-    recent = df.tail(5)
-    if recent["choch_bullish"].any() or recent["bos_bullish"].any():
+    recent = candles[-5:]
+    if any(c["choch_bullish"] or c["bos_bullish"] for c in recent):
         score_bull += 20
         reasons_bull.append("BOS/CHoCH bullish dalam 5 candle terakhir")
-    if recent["choch_bearish"].any() or recent["bos_bearish"].any():
+    if any(c["choch_bearish"] or c["bos_bearish"] for c in recent):
         score_bear += 20
         reasons_bear.append("BOS/CHoCH bearish dalam 5 candle terakhir")
 
-    if recent["sweep_low"].any():
+    if any(c["sweep_low"] for c in recent):
         score_bull += 15
         reasons_bull.append("Liquidity sweep di bawah (stop hunt) dalam 5 candle terakhir")
-    if recent["sweep_high"].any():
+    if any(c["sweep_high"] for c in recent):
         score_bear += 15
         reasons_bear.append("Liquidity sweep di atas (stop hunt) dalam 5 candle terakhir")
 
     price = last["close"]
-    atr_now = last["atr"] if not pd.isna(last["atr"]) else price * 0.001
+    atr_now = last["atr"] if not is_nan(last["atr"]) else price * 0.001
     ob_tolerance = atr_now * 0.5
 
     if ob_bull and (ob_bull["low"] - ob_tolerance) <= price <= (ob_bull["high"] + ob_tolerance):
@@ -581,12 +706,17 @@ def calculate_score(df, ob_bull, ob_bear, fvg_data, fibo, bias_1h, bias_4h):
             score_bear += 12
             reasons_bear.append("Price di zona OTE Fibo 0.618-0.79 (premium)")
 
-    if last["wma_fast"] > last["wma_slow"] and prev["wma_fast"] <= prev["wma_slow"]:
-        score_bull += 10
-        reasons_bull.append("WMA9 cross up WMA21 (trigger momentum)")
-    if last["wma_fast"] < last["wma_slow"] and prev["wma_fast"] >= prev["wma_slow"]:
-        score_bear += 10
-        reasons_bear.append("WMA9 cross down WMA21 (trigger momentum)")
+    wma_f_last = last["wma_fast"]
+    wma_s_last = last["wma_slow"]
+    wma_f_prev = prev["wma_fast"]
+    wma_s_prev = prev["wma_slow"]
+    if None not in (wma_f_last, wma_s_last, wma_f_prev, wma_s_prev):
+        if wma_f_last > wma_s_last and wma_f_prev <= wma_s_prev:
+            score_bull += 10
+            reasons_bull.append("WMA9 cross up WMA119 (trigger momentum)")
+        if wma_f_last < wma_s_last and wma_f_prev >= wma_s_prev:
+            score_bear += 10
+            reasons_bear.append("WMA9 cross down WMA119 (trigger momentum)")
 
     if 35 <= last["rsi"] <= 55 and last["rsi"] > prev["rsi"]:
         score_bull += 8
@@ -624,10 +754,6 @@ def calculate_score(df, ob_bull, ob_bear, fvg_data, fibo, bias_1h, bias_4h):
 # TRADE PLAN - SL/TP DINAMIS (ATR + OB/iFVG + Fibonacci + Volatility Regime)
 # =====================================================================
 
-# Multiplier risk:reward per level TP, disesuaikan dengan volatility regime
-# (diadopsi & diadaptasi dari smclite v7.6.8 - versi smclite pakai ini untuk
-# SEMUA basis SL/TP; di sini hanya dipakai untuk multi-level TP, SL tetap
-# struktural OB/iFVG/Fibo + ATR seperti versi asli engine ini)
 _TP_MULTIPLIERS = {
     "HIGH_VOLATILITY": {"sl": 1.4, "tp1": 1.6, "tp2": 2.4, "tp3": 3.2},
     "CHOPPY":          {"sl": 0.8, "tp1": 1.0, "tp2": 1.6, "tp3": 2.2},
@@ -635,27 +761,14 @@ _TP_MULTIPLIERS = {
 }
 
 
-def build_trade_plan(direction, df, ob, fvg_zone, fibo, volatility_regime="TRENDING",
+def build_trade_plan(direction, candles, ob, fvg_zone, fibo, volatility_regime="TRENDING",
                       rr_min=RISK_REWARD_MIN):
-    """
-    SEMUA nilai entry/SL/TP dihitung dinamis dari kondisi pasar SAAT INI
-    (candle terakhir yang baru ditutup) - tidak ada angka hardcoded.
-
-    Entry = harga close live.
-    SL    = kombinasi struktur OB/iFVG/Fibo + buffer ATR yang besarnya
-            proporsional terhadap volatilitas pasar saat itu.
-    TP1/TP2/TP3 = multi-level take profit (diadopsi dari smclite v7.6.8),
-            multiplier risk:reward-nya beradaptasi terhadap volatility_regime:
-            HIGH_VOLATILITY melebar (target lebih jauh, sesuai swing besar),
-            CHOPPY menyempit (target lebih dekat, hindari overstay di sideways),
-            TRENDING di tengah-tengah (kondisi normal).
-            take_profit (single, untuk kompatibilitas mundur) = TP1.
-    """
-    last = df.iloc[-1]
+    """SL/TP dinamis dengan TP1/TP2/TP3 adaptive volatility regime. Identik logikanya dengan versi pandas."""
+    last = candles[-1]
     entry = last["close"]
     atr = last["atr"]
 
-    if pd.isna(atr) or atr <= 0:
+    if is_nan(atr) or atr is None or atr <= 0:
         return None
 
     mult = _TP_MULTIPLIERS.get(volatility_regime, _TP_MULTIPLIERS["TRENDING"])
@@ -712,7 +825,7 @@ def build_trade_plan(direction, df, ob, fvg_zone, fibo, volatility_regime="TREND
     return {
         "entry": round(float(entry), 2),
         "stop_loss": round(float(sl), 2),
-        "take_profit": round(float(tp1), 2),   # kompatibilitas mundur (UI lama)
+        "take_profit": round(float(tp1), 2),
         "tp1": round(float(tp1), 2),
         "tp2": round(float(tp2), 2),
         "tp3": round(float(tp3), 2),
@@ -728,13 +841,9 @@ def build_trade_plan(direction, df, ob, fvg_zone, fibo, volatility_regime="TREND
 # SIGNAL DECISION
 # =====================================================================
 
-def get_signal(score_bull, score_bear, fibo, last_row):
-    """
-    Tentukan sinyal kandidat berdasarkan skor confluence. Ini BELUM final -
-    run_analysis() akan memvalidasi lebih lanjut dengan retest filter
-    sebelum sinyal benar-benar dianggap actionable.
-    """
-    rsi = last_row["rsi"]
+def get_signal(score_bull, score_bear, fibo, last_candle):
+    """Tentukan sinyal kandidat. Identik logikanya dengan versi pandas."""
+    rsi = last_candle["rsi"]
 
     hard_block_buy = fibo and fibo["zone"] == "premium" and rsi > 75
     hard_block_sell = fibo and fibo["zone"] == "discount" and rsi < 25
@@ -758,61 +867,52 @@ def get_signal(score_bull, score_bear, fibo, last_row):
 def run_analysis():
     """
     Jalankan satu siklus analisa lengkap. Return dict berisi semua hasil,
-    atau dict dengan key 'error' jika gagal.
-    Tidak ada side-effect (print/notify) di sini - itu tanggung jawab caller.
-
-    PIPELINE v2 (update dari hasil komparasi dengan smclite v7.6.8):
-    1. Hitung semua indikator & deteksi struktur seperti sebelumnya
-    2. Hitung volatility_regime (BARU - diadopsi dari smclite)
-    3. Tentukan sinyal KANDIDAT dari scoring confluence (seperti sebelumnya)
-    4. Validasi retest filter ke zona OB/FVG (BARU - retest filter yang
-       sudah diperbaiki, retest ke struktur asli bukan ke WMA9)
-       -> Jika sinyal kandidat ada tapi retest gagal, downgrade ke WAIT
-    5. Build trade plan dengan TP1/TP2/TP3 adaptive volatility (BARU)
+    atau dict dengan key 'error' jika gagal. Identik logikanya dengan
+    versi pandas - hanya struktur data internal yang berbeda (list of
+    dict, bukan DataFrame).
     """
-    df_entry, err1 = get_binance_klines(interval=TF_ENTRY, limit=LIMIT)
-    df_1h, err2    = get_binance_klines(interval=TF_BIAS_1, limit=160)
-    df_4h, err3    = get_binance_klines(interval=TF_BIAS_2, limit=160)
+    entry_candles, err1 = get_binance_klines(interval=TF_ENTRY, limit=LIMIT)
+    htf1_candles, err2  = get_binance_klines(interval=TF_BIAS_1, limit=160)
+    htf2_candles, err3  = get_binance_klines(interval=TF_BIAS_2, limit=160)
 
-    if df_entry is None or df_1h is None or df_4h is None:
+    if entry_candles is None or htf1_candles is None or htf2_candles is None:
         return {"error": err1 or err2 or err3 or "Data tidak lengkap"}
 
-    if len(df_entry) < 130 or len(df_1h) < 130 or len(df_4h) < 130:
+    if len(entry_candles) < 130 or len(htf1_candles) < 130 or len(htf2_candles) < 130:
         return {"error": "Data terlalu sedikit untuk analisa reliable (perlu >=130 candle untuk WMA119)"}
 
-    df_entry = add_indicators(df_entry)
-    df_entry = detect_swings(df_entry)
-    df_entry = detect_structure(df_entry)
-    df_entry = detect_sweep(df_entry)
+    entry_candles = add_indicators(entry_candles)
+    entry_candles = detect_swings(entry_candles)
+    entry_candles = detect_structure(entry_candles)
+    entry_candles = detect_sweep(entry_candles)
 
-    volatility_regime = get_volatility_regime(df_entry)
+    volatility_regime = get_volatility_regime(entry_candles)
 
-    ob_bull, ob_bear = detect_orderblock(df_entry)
-    fvg_data = detect_fvg_ifvg(df_entry)
-    fibo = get_fibo_ote(df_entry)
+    ob_bull, ob_bear = detect_orderblock(entry_candles)
+    fvg_data = detect_fvg_ifvg(entry_candles)
+    fibo = get_fibo_ote(entry_candles)
 
-    bias_1h = get_htf_bias(df_1h)
-    bias_4h = get_htf_bias(df_4h)
+    bias_1h = get_htf_bias(htf1_candles)
+    bias_4h = get_htf_bias(htf2_candles)
 
     score_bull, score_bear, reasons_bull, reasons_bear = calculate_score(
-        df_entry, ob_bull, ob_bear, fvg_data, fibo, bias_1h, bias_4h
+        entry_candles, ob_bull, ob_bear, fvg_data, fibo, bias_1h, bias_4h
     )
 
-    last_row = df_entry.iloc[-1]
-    signal, score = get_signal(score_bull, score_bear, fibo, last_row)
+    last_candle = entry_candles[-1]
+    signal, score = get_signal(score_bull, score_bear, fibo, last_candle)
     reasons = reasons_bull if "BUY" in signal else reasons_bear if "SELL" in signal else []
 
-    # --- Retest filter (BARU) ---
     retest_ok = True
     if "BUY" in signal:
         relevant_fvg = fvg_data["ifvg_bull"] or fvg_data["fvg_bull"]
-        retest_ok = get_retest_confirmation(df_entry, "BUY", ob_bull, relevant_fvg)
+        retest_ok = get_retest_confirmation(entry_candles, "BUY", ob_bull, relevant_fvg)
         if not retest_ok:
             reasons = reasons + ["[DITAHAN] Belum ada retest valid ke zona OB/FVG"]
             signal = "NO SIGNAL / WAIT"
     elif "SELL" in signal:
         relevant_fvg = fvg_data["ifvg_bear"] or fvg_data["fvg_bear"]
-        retest_ok = get_retest_confirmation(df_entry, "SELL", ob_bear, relevant_fvg)
+        retest_ok = get_retest_confirmation(entry_candles, "SELL", ob_bear, relevant_fvg)
         if not retest_ok:
             reasons = reasons + ["[DITAHAN] Belum ada retest valid ke zona OB/FVG"]
             signal = "NO SIGNAL / WAIT"
@@ -820,20 +920,25 @@ def run_analysis():
     plan = None
     if "BUY" in signal:
         relevant_fvg = fvg_data["ifvg_bull"] or fvg_data["fvg_bull"]
-        plan = build_trade_plan("BUY", df_entry, ob_bull, relevant_fvg, fibo, volatility_regime)
+        plan = build_trade_plan("BUY", entry_candles, ob_bull, relevant_fvg, fibo, volatility_regime)
     elif "SELL" in signal:
         relevant_fvg = fvg_data["ifvg_bear"] or fvg_data["fvg_bear"]
-        plan = build_trade_plan("SELL", df_entry, ob_bear, relevant_fvg, fibo, volatility_regime)
+        plan = build_trade_plan("SELL", entry_candles, ob_bear, relevant_fvg, fibo, volatility_regime)
+
+    atr_val = last_candle["atr"]
+    wma_fast_val = last_candle["wma_fast"]
+    wma_slow_val = last_candle["wma_slow"]
+    rsi2_val = last_candle["rsi2"]
 
     return {
         "error": None,
-        "time": str(last_row["time"]),
-        "close": round(float(last_row["close"]), 2),
-        "atr": round(float(last_row["atr"]), 2) if not pd.isna(last_row["atr"]) else None,
-        "rsi": round(float(last_row["rsi"]), 1),
-        "rsi2": round(float(last_row["rsi2"]), 1) if not pd.isna(last_row["rsi2"]) else None,
-        "wma_fast": round(float(last_row["wma_fast"]), 2) if not pd.isna(last_row["wma_fast"]) else None,
-        "wma_slow": round(float(last_row["wma_slow"]), 2) if not pd.isna(last_row["wma_slow"]) else None,
+        "time": _time_to_str(last_candle["time"]),
+        "close": round(float(last_candle["close"]), 2),
+        "atr": round(float(atr_val), 2) if not is_nan(atr_val) else None,
+        "rsi": round(float(last_candle["rsi"]), 1),
+        "rsi2": round(float(rsi2_val), 1) if not is_nan(rsi2_val) else None,
+        "wma_fast": round(float(wma_fast_val), 2) if not is_nan(wma_fast_val) else None,
+        "wma_slow": round(float(wma_slow_val), 2) if not is_nan(wma_slow_val) else None,
         "volatility_regime": volatility_regime,
         "bias_1h": bias_1h["bias"],
         "bias_4h": bias_4h["bias"],

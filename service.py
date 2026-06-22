@@ -123,7 +123,6 @@ def main_loop():
             else:
                 status_text = f"Error: {result['error']}"
 
-            print(status_text)
             _update_service_notification(service, status_text)
 
         except Exception:

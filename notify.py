@@ -12,9 +12,6 @@ dan no-op aman jika platform tidak didukung (tidak akan crash app).
 ================================================================================
 """
 
-ENGINE_VERSION = "HYBRID-SMC-ICT-WMA-RSI-FIBO v1.0"
-
-
 def send_notify(message, title_suffix=""):
     """
     Kirim notifikasi sistem. Aman dipanggil di platform apapun -
