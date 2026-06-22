@@ -9,7 +9,7 @@ source.include_exts = py,png,jpg,kv,atlas,db
 
 version = 1.0
 
-requirements = python3,kivy==2.2.1,pandas,numpy,requests,plyer,pyjnius,certifi,urllib3,charset-normalizer,idna
+requirements = python3,kivy==2.2.1,plyer,pyjnius
 
 orientation = portrait
 fullscreen = 0
