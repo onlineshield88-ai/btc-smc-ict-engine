@@ -1,71 +1,50 @@
-name: Build APK Android
+name: Build APK
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:
+    branches:
+      - main
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
-      - name: Install System Dependencies
+      - name: Install Java
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git zip unzip openjdk-17-jdk \
-            autoconf automake libtool pkg-config \
-            zlib1g-dev libncurses5-dev \
-            libffi-dev libssl-dev
+          sudo apt update
+          sudo apt install -y openjdk-17-jdk zip unzip
 
-      - name: Set JAVA_HOME
+      - name: Install Buildozer
         run: |
-          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
+          pip install --upgrade pip
+          pip install buildozer==1.5.0 Cython==0.29.36
 
-      - name: Clean Build Cache
+      - name: Clean
         run: |
           rm -rf .buildozer
           rm -rf ~/.buildozer
 
-      - name: Install Buildozer
-        run: |
-          python -m pip install --upgrade pip
-          pip install \
-            buildozer==1.4.0 \
-            cython==0.29.36 \
-            setuptools==69.5.1 \
-            wheel==0.42.0 \
-            virtualenv==20.24.7
-
       - name: Build APK
-        shell: bash
         run: |
           set -eo pipefail
-          yes y | buildozer -v android debug 2>&1 | tee build.log
-
-          echo ""
-          echo "=== APK FILES ==="
-          find . -name "*.apk"
+          buildozer android debug | tee build.log
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: BTC-SMC-ICT-Engine-APK
+          name: apk
           path: |
             bin/*.apk
             **/*.apk
 
-      - name: Upload Build Log
+      - name: Upload Log
         if: always()
         uses: actions/upload-artifact@v4
         with:
