@@ -9,26 +9,20 @@ source.include_exts = py,png,jpg,kv,atlas,db
 
 version = 1.0
 
-requirements = python3,kivy==2.2.1,plyer,pyjnius
+requirements = python3,kivy==2.2.1,plyer,pyjnius,certifi
 
 orientation = portrait
 fullscreen = 0
 
-# icon.filename = %(source.dir)s/data/icon.png
-# (sengaja dimatikan dulu - icon custom file binary, susah di-copas via teks.
-#  APK pertama akan pakai icon default Kivy. Bisa ditambah belakangan.)
-
 android.permissions = INTERNET,FOREGROUND_SERVICE,WAKE_LOCK,POST_NOTIFICATIONS,RECEIVE_BOOT_COMPLETED
-
 services = Engine:service.py:foreground
 
 android.api = 33
 android.minapi = 24
 android.ndk = 25b
-android.archs = arm64-v8a, armeabi-v7a
+android.archs = arm64-v8a
 
 android.allow_backup = True
-android.gradle_dependencies =
 
 [buildozer]
 log_level = 2
