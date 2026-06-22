@@ -1,0 +1,81 @@
+name: Build APK Android
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout kode
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            autoconf automake autopoint libtool libltdl-dev pkg-config \
+            gettext build-essential ccache git \
+            libffi-dev libssl-dev \
+            zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev \
+            libreadline-dev wget lld zip unzip \
+            cmake ninja-build \
+            openjdk-17-jdk
+
+      - name: Set JAVA_HOME
+        run: |
+          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
+          echo "/usr/lib/jvm/java-17-openjdk-amd64/bin" >> $GITHUB_PATH
+          java -version
+
+      - name: Install buildozer dan cython
+        run: |
+          pip install --upgrade pip
+          pip install "buildozer==1.5.0" "cython==0.29.37" "virtualenv<21"
+
+      - name: Cache buildozer global (SDK/NDK)
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: buildozer-global-v3-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-global-v3-
+
+      - name: Cache .buildozer lokal
+        uses: actions/cache@v4
+        with:
+          path: .buildozer
+          key: buildozer-local-v3-${{ hashFiles('buildozer.spec') }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            buildozer-local-v3-
+
+      - name: Build APK
+        run: |
+          yes y | buildozer -v android debug 2>&1 | tee build.log
+          echo ""
+          echo "=== File APK yang dihasilkan ==="
+          find . -name "*.apk" -exec ls -lh {} \;
+
+      - name: Upload APK sebagai artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BTC-SMC-ICT-Engine-APK
+          path: bin/*.apk
+          retention-days: 30
+
+      - name: Upload build log jika gagal
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-error
+          path: build.log
+          retention-days: 7

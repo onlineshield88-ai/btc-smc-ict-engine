@@ -1,8 +1,0 @@
-# Versi pure Python (v2.1) - engine.py TIDAK butuh dependency eksternal
-# apapun (tidak pandas, tidak numpy, tidak requests). Semua memakai modul
-# bawaan Python: urllib.request (fetch HTTP), json, math, sqlite3, datetime.
-#
-# Untuk testing UI di desktop (bukan compile APK), satu-satunya dependency
-# eksternal yang dibutuhkan adalah Kivy itu sendiri:
-kivy==2.2.1
-plyer
