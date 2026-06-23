@@ -34,7 +34,7 @@ jobs:
             libreadline-dev wget lld zip unzip \
             openjdk-17-jdk
 
-      - name: Install buildozer terbaru + p4a develop
+      - name: Install buildozer + p4a develop
         run: |
           pip install --upgrade pip
           pip install Cython==0.29.37
@@ -50,21 +50,32 @@ jobs:
       - name: Build APK
         run: |
           yes y | buildozer -v android debug 2>&1 | tee build.log
-          echo "=== Cari APK ==="
-          find . -name "*.apk" 2>/dev/null
 
-      - name: Upload APK
+      - name: Cari APK di semua lokasi
+        run: |
+          echo "=== Cari APK di seluruh sistem ==="
+          find / -name "*.apk" 2>/dev/null | grep -v "proc\|sys\|dev"
+          echo "=== Cari di .buildozer ==="
+          find .buildozer -name "*.apk" 2>/dev/null || echo "tidak ada di .buildozer"
+          echo "=== Cari di bin ==="
+          find bin -name "*.apk" 2>/dev/null || echo "tidak ada di bin"
+          echo "=== Cari di home runner ==="
+          find /home/runner -name "*.apk" 2>/dev/null || echo "tidak ada"
+
+      - name: Upload APK dari semua lokasi
         uses: actions/upload-artifact@v4
         with:
           name: BTC-SMC-ICT-Engine-APK
-          path: "**/*.apk"
+          path: |
+            **/*.apk
+            .buildozer/**/*.apk
           retention-days: 30
           if-no-files-found: warn
 
-      - name: Upload log jika gagal
-        if: failure()
+      - name: Upload log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-error
+          name: build-log
           path: build.log
           retention-days: 7
