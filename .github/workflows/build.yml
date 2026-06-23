@@ -48,8 +48,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-p4a-2024-${{ hashFiles('buildozer.spec') }}
-          restore-keys: buildozer-p4a-2024-
+          key: buildozer-nocache-${{ github.run_id }}
+          restore-keys: buildozer-nocache-
 
       - name: Build APK
         run: |
