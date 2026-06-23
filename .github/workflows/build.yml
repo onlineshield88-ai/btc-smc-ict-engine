@@ -8,62 +8,63 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 90
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - name: Set JAVA_HOME
+        run: |
+          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
+          echo "/usr/lib/jvm/java-17-openjdk-amd64/bin" >> $GITHUB_PATH
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            autoconf automake autopoint libtool pkg-config \
+            gettext build-essential ccache git \
+            libffi-dev libssl-dev libltdl-dev \
+            zlib1g-dev libncurses5-dev libnss3-dev \
+            libreadline-dev wget lld zip unzip \
+            openjdk-17-jdk
+
+      - name: Install Buildozer versi dikunci
+        run: |
+          pip install --upgrade pip
+          pip install buildozer==1.4.0
+          pip install cython==0.29.37
+          pip install python-for-android==2024.1.21
+
+      - name: Cache buildozer
+        uses: actions/cache@v4
         with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Install Linux Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git zip unzip \
-            autoconf automake libtool pkg-config \
-            zlib1g-dev libncurses5-dev \
-            libffi-dev libssl-dev
-
-      - name: Install Buildozer
-        run: |
-          python -m pip install --upgrade pip
-          pip install \
-            buildozer==1.4.0 \
-            cython==0.29.36 \
-            virtualenv==20.24.7
-
-      - name: Clean Cache
-        run: |
-          rm -rf .buildozer
-          rm -rf ~/.buildozer
+          path: ~/.buildozer
+          key: buildozer-locked-${{ hashFiles('buildozer.spec') }}
+          restore-keys: buildozer-locked-
 
       - name: Build APK
-        shell: bash
         run: |
-          set -eo pipefail
-          buildozer -v android debug 2>&1 | tee build.log
+          yes y | buildozer -v android debug 2>&1 | tee build.log
+          echo "=== Cari APK ==="
+          find . -name "*.apk" 2>/dev/null
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: BTC-SMC-ICT-Engine-APK
-          path: |
-            bin/*.apk
-            **/*.apk
+          path: "**/*.apk"
+          retention-days: 30
+          if-no-files-found: warn
 
-      - name: Upload Log
-        if: always()
+      - name: Upload log jika gagal
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-log-error
           path: build.log
+          retention-days: 7
