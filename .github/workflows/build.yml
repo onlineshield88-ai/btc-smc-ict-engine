@@ -33,19 +33,19 @@ jobs:
             libreadline-dev wget lld zip unzip \
             openjdk-17-jdk
 
-      - name: Install Buildozer versi dikunci
+      - name: Install stack dikunci
         run: |
           pip install --upgrade pip
+          pip install Cython==0.29.37
           pip install buildozer==1.4.0
-          pip install cython==0.29.37
-          pip install python-for-android==2024.1.21
+          pip install git+https://github.com/kivy/python-for-android.git@2024.01.21
 
       - name: Cache buildozer
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-locked-${{ hashFiles('buildozer.spec') }}
-          restore-keys: buildozer-locked-
+          key: buildozer-p4a-2024-${{ hashFiles('buildozer.spec') }}
+          restore-keys: buildozer-p4a-2024-
 
       - name: Build APK
         run: |
