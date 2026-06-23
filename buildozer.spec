@@ -5,7 +5,7 @@ package.domain = org.btctrader
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 version = 2.0
-requirements = python3,kivy==2.2.1,plyer,pyjnius
+requirements = python3==3.11.9,kivy==2.2.1,plyer,pyjnius
 orientation = portrait
 fullscreen = 0
 android.permissions = INTERNET,FOREGROUND_SERVICE,WAKE_LOCK,POST_NOTIFICATIONS,RECEIVE_BOOT_COMPLETED
@@ -14,8 +14,8 @@ android.minapi = 24
 android.ndk = 25b
 android.ndk_api = 24
 android.arch = arm64-v8a
-android.p4a_version = 2024.1.21
-p4a.branch = master
+p4a.branch = develop
+p4a.local_recipes =
 
 [buildozer]
 log_level = 2
