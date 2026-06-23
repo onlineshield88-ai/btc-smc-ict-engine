@@ -5,7 +5,7 @@ package.domain = org.btctrader
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 version = 2.0
-requirements = python3,kivy==2.2.1,plyer,pyjnius
+requirements = python3,kivy==2.3.0,plyer,pyjnius
 orientation = portrait
 fullscreen = 0
 android.permissions = INTERNET,FOREGROUND_SERVICE,WAKE_LOCK,POST_NOTIFICATIONS,RECEIVE_BOOT_COMPLETED
