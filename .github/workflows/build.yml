@@ -13,7 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python 3.11 (wajib untuk hostpython)
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -33,6 +34,12 @@ jobs:
             libreadline-dev wget lld zip unzip \
             openjdk-17-jdk
 
+      - name: Verifikasi Python 3.11
+        run: |
+          python --version
+          python -c "import cgi; print('cgi OK')"
+          which python
+
       - name: Install buildozer + p4a pinned
         run: |
           pip install --upgrade pip
@@ -45,7 +52,6 @@ jobs:
         with:
           path: ~/.buildozer
           key: buildozer-v2023-${{ github.run_id }}
-          restore-keys: buildozer-v2023-
 
       - name: Build APK
         run: |
