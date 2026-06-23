@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Python 3.11 (wajib untuk hostpython)
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -34,13 +34,18 @@ jobs:
             libreadline-dev wget lld zip unzip \
             openjdk-17-jdk
 
-      - name: Verifikasi Python 3.11
+      - name: Pastikan Python 3.11 jadi default sistem
         run: |
+          PYPATH=$(which python)
+          echo "Python path: $PYPATH"
           python --version
-          python -c "import cgi; print('cgi OK')"
-          which python
+          # Paksa semua python3 mengarah ke 3.11
+          sudo ln -sf $PYPATH /usr/local/bin/python3
+          sudo ln -sf $PYPATH /usr/bin/python3
+          python3 --version
+          python3 -c "import cgi; print('cgi OK')"
 
-      - name: Install buildozer + p4a pinned
+      - name: Install buildozer + p4a
         run: |
           pip install --upgrade pip
           pip install Cython==0.29.37
