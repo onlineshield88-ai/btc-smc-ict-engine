@@ -13,7 +13,17 @@ untuk refresh tampilan dashboard, dan membaca db.py untuk history.
 ================================================================================
 """
 
+
+import os
+
+try:
+    with open("/storage/emulated/0/main_loaded.txt", "w") as fp:
+        fp.write("main.py imported\n")
+except Exception:
+    pass
+
 import threading
+
 
 from kivy.app import App
 from kivy.lang import Builder
