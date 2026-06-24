@@ -51,7 +51,6 @@ KV = """
         Label:
             text: root.signal_text
             color: root.signal_color
-            bold: True
             font_size: "16sp"
             halign: "left"
             valign: "middle"
@@ -95,7 +94,6 @@ KV = """
             Label:
                 text: root.entry_text
                 font_size: "13sp"
-                bold: True
         BoxLayout:
             orientation: "vertical"
             spacing: "2dp"
@@ -113,7 +111,6 @@ KV = """
             Label:
                 text: root.sl_text
                 font_size: "13sp"
-                bold: True
                 color: 0.92, 0.38, 0.38, 1
         BoxLayout:
             orientation: "vertical"
@@ -132,7 +129,6 @@ KV = """
             Label:
                 text: root.tp_text
                 font_size: "13sp"
-                bold: True
                 color: 0.35, 0.85, 0.5, 1
 
     Label:
@@ -177,7 +173,6 @@ KV = """
         Label:
             text: "BTC SMC ICT Engine"
             font_size: "17sp"
-            bold: True
             color: 0.95, 0.78, 0.25, 1
             halign: "left"
             text_size: self.size
@@ -225,7 +220,6 @@ KV = """
                             id: dash_signal
                             text: "Memuat..."
                             font_size: "24sp"
-                            bold: True
                             color: 0.85, 0.85, 0.85, 1
                         Label:
                             id: dash_score
@@ -259,7 +253,6 @@ KV = """
                                 id: dash_entry
                                 text: "-"
                                 font_size: "15sp"
-                                bold: True
                         BoxLayout:
                             orientation: "vertical"
                             spacing: "3dp"
@@ -278,7 +271,6 @@ KV = """
                                 id: dash_sl
                                 text: "-"
                                 font_size: "15sp"
-                                bold: True
                                 color: 0.92, 0.38, 0.38, 1
                         BoxLayout:
                             orientation: "vertical"
@@ -298,7 +290,6 @@ KV = """
                                 id: dash_tp
                                 text: "-"
                                 font_size: "15sp"
-                                bold: True
                                 color: 0.35, 0.85, 0.5, 1
 
                     # RR + ATR row
@@ -327,7 +318,6 @@ KV = """
                     Label:
                         text: "Indikator"
                         font_size: "13sp"
-                        bold: True
                         color: 0.75, 0.75, 0.75, 1
                         halign: "left"
                         text_size: self.size
@@ -359,7 +349,6 @@ KV = """
                     Label:
                         text: "Confluence"
                         font_size: "13sp"
-                        bold: True
                         color: 0.75, 0.75, 0.75, 1
                         halign: "left"
                         text_size: self.size
@@ -452,7 +441,6 @@ KV = """
                     Label:
                         text: "Kontrol Background Engine"
                         font_size: "16sp"
-                        bold: True
                         color: 0.9, 0.9, 0.9, 1
                         halign: "left"
                         text_size: self.size
@@ -490,7 +478,6 @@ KV = """
                     Label:
                         text: "PENTING - Agar engine stabil di background:"
                         font_size: "13sp"
-                        bold: True
                         color: 0.9, 0.75, 0.3, 1
                         halign: "left"
                         text_size: self.size
