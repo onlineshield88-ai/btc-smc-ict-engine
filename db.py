@@ -10,6 +10,10 @@ dan service.py (simpan sinyal baru saat terdeteksi).
 import sqlite3
 import os
 import threading
+from config import DATABASE
+
+# Development mode
+DEBUG_SAVE_ALL_SIGNALS = True
 
 _lock = threading.Lock()
 
@@ -26,7 +30,7 @@ def get_db_path():
         base_dir = android_private
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_dir, "signals.db")
+    return os.path.join(base_dir, DATABASE)
 
 
 def get_connection():
@@ -95,7 +99,10 @@ def insert_signal(data):
     Mengembalikan True jika berhasil disimpan, False jika sudah ada
     (duplikat candle_time + signal, mencegah double entry tiap cycle).
     """
-    if data.get("signal", "NO SIGNAL / WAIT") == "NO SIGNAL / WAIT":
+    if (
+        data.get("signal", "NO SIGNAL / WAIT") == "NO SIGNAL / WAIT"
+        and not DEBUG_SAVE_ALL_SIGNALS
+    ):
         return False
 
     plan = data.get("plan") or {}

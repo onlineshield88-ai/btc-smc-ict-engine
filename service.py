@@ -27,13 +27,23 @@ CATATAN PENTING SOAL "TETAP LIVE DI BACKGROUND" DI ANDROID:
 
 import time
 import traceback
+from logger import logger
 from datetime import datetime
 
 import engine
 import db
+import cache
+import heartbeat
+import candle_sync
 from notify import send_notify
+from config import REFRESH_SECONDS, SAVE_WAIT_SIGNALS
 
-REFRESH_SECONDS = 20
+
+
+# Development mode
+# True  = simpan BUY / SELL / WAIT
+# False = simpan BUY / SELL saja
+DEBUG_SAVE_ALL_SIGNALS = SAVE_WAIT_SIGNALS
 _last_signal_candle_time = None
 
 
@@ -84,6 +94,14 @@ def run_cycle():
 
     result = engine.run_analysis()
 
+    try:
+        cache.save(result)
+        heartbeat.update()
+        heartbeat.update()
+    except Exception as e:
+        print("[CACHE]", e)
+
+
     if result.get("error"):
         print(f"[service] error: {result['error']}")
         return result
@@ -91,8 +109,20 @@ def run_cycle():
     signal = result["signal"]
     candle_time = result["time"]
 
-    if signal != "NO SIGNAL / WAIT":
-        saved = db.insert_signal(result)
+    if not candle_sync.is_new_candle(candle_time):
+        return result
+
+    if DEBUG_SAVE_ALL_SIGNALS or signal != "NO SIGNAL / WAIT":
+        print("[DEBUG] signal =", signal)
+        print("[DEBUG] time   =", result.get("time"))
+        print("[DEBUG] score  =", result.get("score"))
+
+        try:
+            saved = db.insert_signal(result)
+            print("[DEBUG] insert_signal =", saved)
+        except Exception as e:
+            print("[DEBUG] insert_signal ERROR =", e)
+            raise
         if saved and _last_signal_candle_time != candle_time:
             plan = result.get("plan") or {}
             regime = result.get("volatility_regime", "-")
@@ -108,7 +138,7 @@ def run_cycle():
 
 
 def main_loop():
-    print(f"[service] Engine dimulai: {engine.ENGINE_VERSION}")
+    logger.info(f"Engine started: {engine.ENGINE_VERSION}")
     service = _setup_foreground_notification()
 
     while True:
@@ -126,7 +156,7 @@ def main_loop():
             _update_service_notification(service, status_text)
 
         except Exception:
-            print("[service] EXCEPTION saat run_cycle:")
+            logger.exception("Exception during run_cycle")
             traceback.print_exc()
 
         time.sleep(REFRESH_SECONDS)

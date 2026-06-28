@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Runtime
+signals.db
+latest_analysis.json
+heartbeat.json
+
+# Logs
+logs/
+*.log
+
+# Environment
+.env
+.venv/
+venv/
+
+# Android
+bin/
+build/
+.gradle/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
