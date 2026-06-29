@@ -1,7 +1,7 @@
 from flask import Flask
 
-from backend_config import HOST, PORT, DEBUG
-from routes import register_routes
+from backend.backend_config import HOST, PORT, DEBUG
+from backend.routes import register_routes
 
 app = Flask(__name__)
 

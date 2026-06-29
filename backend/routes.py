@@ -1,6 +1,6 @@
 from flask import jsonify
-from adapter import get_dashboard,get_analysis,get_history,get_settings
-from status import get_status
+from backend.adapter import get_dashboard,get_analysis,get_history,get_settings
+from backend.status import get_status
 
 
 def register_routes(app):

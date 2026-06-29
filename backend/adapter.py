@@ -11,8 +11,8 @@ if PROJECT_ROOT not in sys.path:
 import engine
 import cache
 import db
-import settings
-from mapper import map_dashboard,map_analysis,map_history
+from backend import settings
+from backend.mapper import map_dashboard, map_analysis, map_history
 
 
 
