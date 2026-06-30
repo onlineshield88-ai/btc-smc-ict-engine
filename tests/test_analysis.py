@@ -7,7 +7,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import engine
-from core.analysis import run_analysis
+from core.analysis import run_analysis_from_candles
 
 
 def compare(a, b):
@@ -59,11 +59,19 @@ def compare(a, b):
 
 def test_run_analysis():
 
+    entry, _ = engine.get_binance_klines(limit=300)
+    h1, _ = engine.get_binance_klines(interval="1h", limit=160)
+    h4, _ = engine.get_binance_klines(interval="4h", limit=160)
+
     old = engine.run_analysis()
-    new = run_analysis()
+
+    new = run_analysis_from_candles(
+        entry,
+        h1,
+        h4,
+    )
 
     assert compare(old, new) == 0
-
 
 if __name__ == "__main__":
     test_run_analysis()
